@@ -1,24 +1,27 @@
-from playwright.async_api import async_playwright
-import asyncio
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import logging
+from typing import Set, List
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class IndexCrawler:
-    def __init__(self, base_url, max_depth=2, headless=True):
+    def __init__(self, base_url: str, max_depth: int = 2, headless: bool = True):
         self.base_url = base_url.rstrip('/')
         self.max_depth = max_depth
         self.visited_urls = set()
         self.headless = headless
         self.playwright = None
-        self.browser = None    async def __aenter__(self):
+        self.browser = None
+
+    def start(self):
+        """Initialize the browser"""
         try:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(
                 headless=self.headless,
                 args=['--disable-dev-shm-usage', '--no-sandbox']
             )
@@ -27,15 +30,19 @@ class IndexCrawler:
             logger.error(f"Failed to initialize browser: {e}")
             raise
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    def stop(self):
+        """Clean up resources"""
         try:
             if self.browser:
-                await self.browser.close()
+                self.browser.close()
             if self.playwright:
-                await self.playwright.stop()
+                self.playwright.stop()
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-            raise    async def _extract_links(self, current_url, page_content):
+            raise
+
+    def _extract_links(self, current_url: str, page_content: str) -> Set[str]:
+        """Extract valid links from page content"""
         soup = BeautifulSoup(page_content, 'html.parser')
         links = set()
         base_domain = urlparse(self.base_url).netloc
@@ -48,90 +55,57 @@ class IndexCrawler:
 
                 full_url = urljoin(current_url, href)
                 parsed_url = urlparse(full_url)
-                
-                if parsed_url.scheme not in ('http', 'https'):
-                    continue
 
-                clean_url = parsed_url._replace(fragment="").geturl()
-                
-                if urlparse(clean_url).netloc == base_domain and clean_url != current_url:
-                    links.add(clean_url)
+                # Only include links from the same domain and that are blog posts
+                if (parsed_url.netloc == base_domain and
+                    any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/'])):
+                    links.add(full_url)
+
         except Exception as e:
             logger.error(f"Error extracting links from {current_url}: {e}")
-            
-        return linksasync def crawl(self, url: Optional[str] = None, depth: int = 0) -> List[str]:
-        """Crawl the website starting from the given URL.
-        
-        Args:
-            url (Optional[str]): The URL to crawl. If None, uses base_url
-            depth (int): Current crawl depth
-            
-        Returns:
-            List[str]: List of unique URLs found
-        """
-        if url is None:
-            url = self.base_url
-            
-        url = url.rstrip('/')  # Normalize URL
-        
-        if url in self.visited_urls or depth > self.max_depth:
-            return []
-            
-        if not self.browser:
-            raise RuntimeError("Browser not initialized. Use 'async with' context manager.")
-            
-        logger.info(f"Crawling: {url} (depth: {depth})")
-        self.visited_urls.add(url)
-        all_found_links = [url]
-        
+
+        return links
+
+    def crawl(self, depth: int = 0) -> List[str]:
+        """Crawl the base URL and return all found article links"""
+        if depth >= self.max_depth:
+            return list(self.visited_urls)
+
         try:
-            page = await self.browser.new_page()
-            await page.set_default_timeout(30000)  # 30 second timeout
-            
+            if not self.browser:
+                self.start()
+
+            page = self.browser.new_page()
             try:
-                # Configure page
-                await page.set_extra_http_headers({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/94.0.4606.81 Safari/537.36"
-                })
+                page.goto(self.base_url, wait_until="networkidle", timeout=30000)
+                page_content = page.content()
                 
-                # Navigate to page
-                response = await page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=30000
-                )
+                # Extract links from the current page
+                new_links = self._extract_links(self.base_url, page_content)
                 
-                if not response:
-                    logger.error(f"Failed to get response from {url}")
-                    return all_found_links
-                    
-                if response.status >= 400:
-                    logger.error(f"HTTP {response.status} error for {url}")
-                    return all_found_links
+                # Add new links to visited set
+                self.visited_urls.update(new_links)
                 
-                # Get page content
-                content = await page.content()
-                extracted_links = await self._extract_links(url, content)
-                
-                # Recursively crawl extracted links
-                for link in extracted_links:
+                # Recursively crawl new links
+                for link in new_links:
                     if link not in self.visited_urls:
                         try:
-                            found_in_subtree = await self.crawl(link, depth + 1)
-                            all_found_links.extend(found_in_subtree)
+                            page.goto(link, wait_until="networkidle", timeout=30000)
+                            page_content = page.content()
+                            sub_links = self._extract_links(link, page_content)
+                            self.visited_urls.update(sub_links)
                         except Exception as e:
                             logger.error(f"Error crawling {link}: {e}")
-                            
-            except Exception as e:
-                logger.error(f"Error processing {url}: {e}")
-                
+                            continue
             finally:
-                await page.close()
-                
+                page.close()
+
         except Exception as e:
-            logger.error(f"Failed to create page for {url}: {e}")
-              # Return deduplicated list of links
-        return list(set(all_found_links))
+            logger.error(f"Error during crawl: {e}")
+        finally:
+            self.stop()
+
+        return list(self.visited_urls)
 
 async def test_crawler(url: str) -> None:
     """Test function to verify crawler functionality.

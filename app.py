@@ -1,5 +1,7 @@
 import streamlit as st
 import requests
+from urllib.parse import urlparse, urljoin
+import re
 
 # Set the page config
 st.set_page_config(page_title="Technical Content Scraper", layout="centered")
@@ -23,16 +25,23 @@ st.subheader("🔗 Scrape Blog / Guide / Substack")
 
 url = st.text_input("Enter URL (e.g., https://interviewing.io/blog/how-to-succeed)")
 
-# Clean and validate the URL
-if url:
-    url = url.strip()
-    # Remove any whitespace or quotes
-    url = url.strip('\'"')
+def clean_url(url: str) -> str:
+    """Clean and validate URL"""
+    url = url.strip().strip('\'"')
+    # Remove any extra http:// or https:// in the middle of the URL
+    url = re.sub(r'https?://(?=.*https?://)', '', url)
     if not url.startswith(('http://', 'https://')):
         url = 'https://' + url
-        st.info(f"🔄 Added https:// to URL: {url}")
+    return url
 
-# After the URL input field:
+# Clean and validate the URL
+if url:
+    original_url = url
+    url = clean_url(url)
+    if url != original_url:
+        st.info(f"🔄 Cleaned URL: {url}")
+
+# URL type selection
 url_type = st.radio(
     "URL Type",
     ["Single Page", "Index Page (like interviewing.io/topics#companies)"]
@@ -44,51 +53,58 @@ if st.button("Scrape URL"):
             progress_placeholder = st.empty()
             with st.spinner(""):
                 # Show detailed progress
-                progress_placeholder.info("🔄 Initializing scraper...")
+                progress_placeholder.info("🔄 Preparing to scrape...")
                 
-                # Determine the endpoint based on URL type
-                endpoint = "scrape/url"
-                if url_type == "Index Page (like interviewing.io/topics#companies)":
-                    endpoint = "scrape/index"
-                    progress_placeholder.info("🔄 Preparing to crawl index page...")
+                # Validate URL format
+                parsed_url = urlparse(url)
+                if not all([parsed_url.scheme, parsed_url.netloc]):
+                    st.error("❌ Invalid URL format. Please enter a valid URL.")
                 else:
-                    progress_placeholder.info("🔄 Preparing to scrape single page...")
-                
-                # Make the API request with shorter timeout
-                res = requests.post(
-                    f"http://localhost:8000/{endpoint}",
-                    json={"url": url, "team_id": team_id},
-                    timeout=20
-                )
-                
-                if res.status_code == 200:
-                    progress_placeholder.success("✅ Content retrieved successfully!")
-                    result = res.json()
-                    if isinstance(result, dict):
-                        if result.get('detail'):
-                            st.warning(result['detail'])
-                        elif result.get('items'):
-                            st.success(f"✅ Successfully scraped {len(result['items'])} items!")
-                            st.json(result)
-                        else:
-                            st.json(result)
-                else:
-                    error_msg = "Unknown error"
+                    # Make request to FastAPI backend
+                    api_url = "http://localhost:8000/scrape/url"
+                    
                     try:
-                        error_data = res.json()
-                        error_msg = error_data.get('detail', str(error_data))
-                    except:
-                        error_msg = res.text
-                    st.error(f"❌ Failed to scrape URL.\n\n{error_msg}")
-        
-        except requests.Timeout:
-            st.error("❌ Request timed out. The server took too long to respond. Please try again.")
-        except requests.ConnectionError:
-            st.error("❌ Connection error. Please make sure the backend server is running.")
-        except requests.RequestException as e:
-            st.error(f"❌ Connection error: {str(e)}")
+                        response = requests.post(
+                            api_url,
+                            json={
+                                "url": url,
+                                "team_id": team_id
+                            },
+                            timeout=60  # 60 second timeout
+                        )
+                        
+                        # Handle response
+                        if response.status_code == 200:
+                            result = response.json()
+                            if result.get("items"):
+                                st.success("✅ Successfully scraped content!")
+                                # Display results
+                                for item in result["items"]:
+                                    with st.expander(f"📄 {item['title']}", expanded=True):
+                                        st.markdown("### Content")
+                                        st.markdown(item["content"])
+                                        st.markdown("### Metadata")
+                                        st.json({
+                                            "source_url": item["source_url"],
+                                            "author": item["author"],
+                                            "content_type": item["content_type"]
+                                        })
+                            else:
+                                st.warning("⚠️ No content found in the response")
+                        else:
+                            error_msg = response.json().get("detail", "Unknown error")
+                            st.error(f"❌ Error: {error_msg}")
+                            
+                    except requests.exceptions.Timeout:
+                        st.error("❌ Request timed out. The server took too long to respond. Try using 'Single Page' mode for large blogs.")
+                    except requests.exceptions.ConnectionError:
+                        st.error("❌ Could not connect to the server. Make sure you've started the API server with 'python main.py'")
+                    except Exception as e:
+                        st.error(f"❌ An unexpected error occurred: {str(e)}")
+        except Exception as e:
+            st.error(f"❌ An error occurred: {str(e)}")
     else:
-        st.warning("⚠️ Please enter a URL to scrape.")
+        st.warning("⚠️ Please enter a URL to scrape")
 
 # --- Section 2: Scrape from PDF ---
 st.subheader("📄 Scrape from PDF (e.g., Aline's book)")
@@ -109,4 +125,3 @@ if st.button("Scrape PDF"):
         else:
             st.error(f"❌ Failed to parse PDF.\n\n{res.text}")
     else:
-        st.warning("⚠️ Please upload a PDF file.")
