@@ -1,0 +1,13 @@
+{
+  "team_id": "aline123",
+  "items": [
+    {
+      "title": "Chapter 1: Introduction",
+      "content": "## Chapter 1: Introduction\n\nThis chapter sets the foundation for technical interviewing, outlining key principles...\n\n- Interviews are about communication, not just correctness.",
+      "content_type": "book",
+      "source_url": "",
+      "author": "Aline",
+      "user_id": ""
+    }
+  ]
+}
