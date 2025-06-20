@@ -1,8 +1,10 @@
-from playwright.sync_api import sync_playwright
+import asyncio
+from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import logging
-from typing import Set, List
+from typing import Set, List, Deque
+from collections import deque
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -12,34 +14,26 @@ class IndexCrawler:
     def __init__(self, base_url: str, max_depth: int = 2, headless: bool = True):
         self.base_url = base_url.rstrip('/')
         self.max_depth = max_depth
-        self.visited_urls = set()
         self.headless = headless
         self.playwright = None
         self.browser = None
+        self.visited_urls: Set[str] = set()
 
-    def start(self):
-        """Initialize the browser"""
-        try:
-            self.playwright = sync_playwright().start()
-            self.browser = self.playwright.chromium.launch(
-                headless=self.headless,
-                args=['--disable-dev-shm-usage', '--no-sandbox']
-            )
-            return self
-        except Exception as e:
-            logger.error(f"Failed to initialize browser: {e}")
-            raise
+    async def __aenter__(self):
+        """Initialize the browser using an async context manager"""
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.headless,
+            args=['--disable-dev-shm-usage', '--no-sandbox']
+        )
+        return self
 
-    def stop(self):
-        """Clean up resources"""
-        try:
-            if self.browser:
-                self.browser.close()
-            if self.playwright:
-                self.playwright.stop()
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-            raise
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources using an async context manager"""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
 
     def _extract_links(self, current_url: str, page_content: str) -> Set[str]:
         """Extract valid links from page content"""
@@ -47,107 +41,85 @@ class IndexCrawler:
         links = set()
         base_domain = urlparse(self.base_url).netloc
 
-        try:
-            for anchor in soup.find_all('a', href=True):
-                href = anchor['href'].strip()
-                if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
-                    continue
+        for anchor in soup.find_all('a', href=True):
+            href = anchor['href'].strip()
+            if not href or href.startswith(('#', 'javascript:', 'mailto:', 'tel:')):
+                continue
 
-                full_url = urljoin(current_url, href)
-                parsed_url = urlparse(full_url)
+            full_url = urljoin(current_url, href)
+            parsed_url = urlparse(full_url)
 
-                # Only include links from the same domain and that are blog posts
-                if (parsed_url.netloc == base_domain and
-                    any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/'])):
-                    links.add(full_url)
-
-        except Exception as e:
-            logger.error(f"Error extracting links from {current_url}: {e}")
-
+            if (parsed_url.netloc == base_domain and
+                any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/'])):
+                links.add(full_url)
         return links
 
-    def crawl(self, depth: int = 0) -> List[str]:
-        """Crawl the base URL and return all found article links"""
-        if depth >= self.max_depth:
-            return list(self.visited_urls)
+    async def crawl(self) -> List[str]:
+        """Crawl the base URL and return all found article links using BFS."""
+        if not self.browser:
+            raise Exception("Browser not started. Use 'async with IndexCrawler(...) as crawler:'")
 
+        queue: Deque[(str, int)] = deque([(self.base_url, 0)])
+        found_links: Set[str] = set()
+
+        page = await self.browser.new_page()
         try:
-            if not self.browser:
-                self.start()
+            while queue:
+                current_url, depth = queue.popleft()
 
-            page = self.browser.new_page()
-            try:
-                page.goto(self.base_url, wait_until="networkidle", timeout=30000)
-                page_content = page.content()
-                
-                # Extract links from the current page
-                new_links = self._extract_links(self.base_url, page_content)
-                
-                # Add new links to visited set
-                self.visited_urls.update(new_links)
-                
-                # Recursively crawl new links
-                for link in new_links:
-                    if link not in self.visited_urls:
-                        try:
-                            page.goto(link, wait_until="networkidle", timeout=30000)
-                            page_content = page.content()
-                            sub_links = self._extract_links(link, page_content)
-                            self.visited_urls.update(sub_links)
-                        except Exception as e:
-                            logger.error(f"Error crawling {link}: {e}")
-                            continue
-            finally:
-                page.close()
+                if current_url in self.visited_urls or depth >= self.max_depth:
+                    continue
 
-        except Exception as e:
-            logger.error(f"Error during crawl: {e}")
+                self.visited_urls.add(current_url)
+                logger.info(f"Crawling: {current_url} at depth {depth}")
+
+                try:
+                    await page.goto(current_url, wait_until="networkidle", timeout=30000)
+                    page_content = await page.content()
+                    
+                    parsed_url = urlparse(current_url)
+                    if any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/']):
+                        found_links.add(current_url)
+
+                    new_links = self._extract_links(current_url, page_content)
+                    for link in new_links:
+                        if link not in self.visited_urls:
+                            queue.append((link, depth + 1))
+                except Exception as e:
+                    logger.error(f"Error crawling {current_url}: {e}")
+                    continue
         finally:
-            self.stop()
+            await page.close()
 
-        return list(self.visited_urls)
+        return list(found_links)
 
-async def test_crawler(url: str) -> None:
-    """Test function to verify crawler functionality.
-    
-    Args:
-        url (str): URL to test crawling
-    """
+def test_crawler(url: str) -> None:
+    """Test function to verify crawler functionality."""
     try:
-        async with IndexCrawler(base_url=url, max_depth=1) as crawler:
+        with IndexCrawler(base_url=url, max_depth=1) as crawler:
             logger.info(f"Starting crawl of {url}")
-            links = await crawler.crawl()
+            links = crawler.crawl()
             logger.info(f"Found {len(links)} links:")
             for link in links:
                 logger.info(f"  - {link}")
     except Exception as e:
         logger.error(f"Crawler test failed: {e}")
-        raise
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1:
-        test_url = sys.argv[1]
-    else:
-        test_url = "https://interviewing.io/blog"
+def main():
+    """Main function for standalone testing."""
+    target_base_url = "https://interviewing.io/blog"
     
-    asyncio.run(test_crawler(test_url))
-
-# Example Usage (for testing)
-async def main():
-    # Replace with the base URL of the site you want to crawl
-    # For example, the interviewing.io blog or topics pages
-    target_base_url = "https://interviewing.io/blog" 
-    # target_base_url = "https://interviewing.io/topics#companies"
-    # target_base_url = "https://nilmamano.com/blog/category/dsa"
-
-    crawler = IndexCrawler(base_url=target_base_url, max_depth=1) # max_depth=1 to limit scope for testing
-    async with crawler: # Use async with for proper setup/teardown
-        all_links = await crawler.crawl()
+    with IndexCrawler(base_url=target_base_url, max_depth=1) as crawler:
+        all_links = crawler.crawl()
         print("\nFound URLs:")
         for link in all_links:
             print(link)
         print(f"\nTotal unique URLs found: {len(all_links)}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    if len(sys.argv) > 1:
+        test_url = sys.argv[1]
+        test_crawler(test_url)
+    else:
+        main()

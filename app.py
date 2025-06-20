@@ -70,7 +70,7 @@ if st.button("Scrape URL"):
                                 "url": url,
                                 "team_id": team_id
                             },
-                            timeout=60  # 60 second timeout
+                            timeout=120  # Increased timeout to 120 seconds
                         )
                         
                         # Handle response
@@ -80,20 +80,24 @@ if st.button("Scrape URL"):
                                 st.success("✅ Successfully scraped content!")
                                 # Display results
                                 for item in result["items"]:
-                                    with st.expander(f"📄 {item['title']}", expanded=True):
+                                    with st.expander(f"📄 {item.get('title', 'Untitled')}", expanded=True):
                                         st.markdown("### Content")
                                         st.markdown(item["content"])
                                         st.markdown("### Metadata")
                                         st.json({
-                                            "source_url": item["source_url"],
-                                            "author": item["author"],
-                                            "content_type": item["content_type"]
+                                            "source_url": item.get("source_url", url),
+                                            "author": item.get("author", "Unknown"),
+                                            "content_type": item.get("content_type", "blog")
                                         })
                             else:
                                 st.warning("⚠️ No content found in the response")
                         else:
-                            error_msg = response.json().get("detail", "Unknown error")
-                            st.error(f"❌ Error: {error_msg}")
+                            error_detail = "Unknown error"
+                            try:
+                                error_detail = response.json().get("detail", error_detail)
+                            except:
+                                error_detail = response.text or error_detail
+                            st.error(f"❌ Error: {error_detail}")
                             
                     except requests.exceptions.Timeout:
                         st.error("❌ Request timed out. The server took too long to respond. Try using 'Single Page' mode for large blogs.")
@@ -125,3 +129,4 @@ if st.button("Scrape PDF"):
         else:
             st.error(f"❌ Failed to parse PDF.\n\n{res.text}")
     else:
+        st.warning("Please upload a PDF file first.")

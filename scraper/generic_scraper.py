@@ -8,34 +8,32 @@ class GenericScraper:
     def __init__(self):
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
-    
-    def start(self):
-        """Initialize the browser"""
+
+    def __enter__(self):
+        """Initialize the browser using a context manager"""
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
-            headless=True,  # Run in headless mode
-            args=['--disable-dev-shm-usage']  # Helpful for Linux/Docker environments
+            headless=True,
+            args=['--disable-dev-shm-usage']
         )
         return self
-    
-    def stop(self):
-        """Clean up resources"""
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up resources using a context manager"""
         try:
             if self.browser:
                 self.browser.close()
             if self.playwright:
                 self.playwright.stop()
         except Exception as e:
-            print(f"Error in GenericScraper stop: {e}")
-            # Optionally re-raise or handle as appropriate
-            pass
-    
+            print(f"Error in GenericScraper __exit__: {e}")
+
     def _clean_text(self, text: str) -> str:
         # This method doesn't need to be async as it doesn't do I/O
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
         return text
-    
+
     def _extract_author(self, soup: BeautifulSoup, url: str) -> str:
         # This method doesn't need to be async as it works with already fetched data
         meta_tags = [
@@ -54,7 +52,7 @@ class GenericScraper:
             return author_tag.get_text(strip=True)
 
         return urlparse(url).netloc.replace("www.", "")
-    
+
     def _extract_code_blocks(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
         # This method doesn't need to be async as it works with already fetched data
         code_blocks = []
@@ -72,7 +70,7 @@ class GenericScraper:
                     'content': self._clean_text(code.get_text())
                 })
         return code_blocks
-    
+
     def _convert_to_markdown(self, soup: BeautifulSoup) -> str:
         # This method doesn't need to be async as it works with already fetched data
         markdown = []
@@ -108,7 +106,7 @@ class GenericScraper:
                 markdown.append('\n')
         
         return ''.join(markdown)
-    
+
     def _get_pagination_links(self, soup: BeautifulSoup, base_url: str) -> List[str]:
         # This method doesn't need to be async as it works with already fetched data
         pagination_links = []
@@ -121,19 +119,27 @@ class GenericScraper:
                 pagination_links.append(full_url)
         
         return pagination_links
-    
+
     def scrape(self, url: str) -> Dict:
         """Scrape content from a URL"""
+        page = None
         try:
             page = self.browser.new_page()
-            page.goto(url, wait_until="networkidle")
+            response = page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            if not response or response.status >= 400:
+                return {
+                    "content_type": "error",
+                    "content": f"Failed to load page. Status: {response.status if response else 'No response'}"
+                }
             
             # Get page content
             html = page.content()
             soup = BeautifulSoup(html, 'html.parser')
             
             # Extract content
-            title = soup.find('title').text.strip() if soup.find('title') else ''
+            title = soup.find('title')
+            title = title.text.strip() if title else ''
             
             # Get main content
             article = soup.find('article') or soup.find(class_=re.compile(r'post|article|content|entry'))
@@ -151,7 +157,7 @@ class GenericScraper:
             for tag in article.find_all(['script', 'style', 'nav', 'header', 'footer']):
                 tag.decompose()
                 
-            content = self._clean_text(article.get_text())
+            content = self._convert_to_markdown(article)
             author = self._extract_author(soup, url)
             
             return {
@@ -166,8 +172,8 @@ class GenericScraper:
         except Exception as e:
             return {
                 "content_type": "error",
-                "content": str(e)
+                "content": f"Error scraping {url}: {str(e)}"
             }
         finally:
-            if 'page' in locals():
+            if page:
                 page.close()
