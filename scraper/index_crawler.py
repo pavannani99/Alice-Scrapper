@@ -49,8 +49,8 @@ class IndexCrawler:
             full_url = urljoin(current_url, href)
             parsed_url = urlparse(full_url)
 
-            if (parsed_url.netloc == base_domain and
-                any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/'])):
+            # Only follow links within the same domain
+            if parsed_url.netloc == base_domain:
                 links.add(full_url)
         return links
 
@@ -77,8 +77,8 @@ class IndexCrawler:
                     await page.goto(current_url, wait_until="networkidle", timeout=30000)
                     page_content = await page.content()
                     
-                    parsed_url = urlparse(current_url)
-                    if any(pattern in parsed_url.path.lower() for pattern in ['/blog/', '/post/', '/article/', '/guide/']):
+                    # Add any successfully crawled URL within the same domain to found_links
+                    if urlparse(current_url).netloc == urlparse(self.base_url).netloc:
                         found_links.add(current_url)
 
                     new_links = self._extract_links(current_url, page_content)
@@ -93,7 +93,7 @@ class IndexCrawler:
 
         return list(found_links)
 
-def test_crawler(url: str) -> None:
+def run_test_crawler(url: str) -> None:
     """Test function to verify crawler functionality."""
     try:
         with IndexCrawler(base_url=url, max_depth=1) as crawler:
@@ -120,6 +120,58 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1:
         test_url = sys.argv[1]
-        test_crawler(test_url)
+        # test_crawler(test_url) # Commented out to prevent accidental execution
     else:
-        main()
+        # main() # Commented out to prevent accidental execution
+        pass
+
+
+async def test_deep_url_crawler():
+    """Test crawler with a deep URL structure."""
+    from aiohttp import web
+    import asyncio
+
+    async def handle_root(request):
+        return web.Response(text="""
+            <html>
+                <body>
+                    <a href="/path/to/deep/page">Deep Link</a>
+                </body>
+            </html>
+        """, content_type='text/html')
+
+    async def handle_deep_page(request):
+        return web.Response(text="Deep page content", content_type='text/html')
+
+    app = web.Application()
+    app.router.add_get("/", handle_root)
+    app.router.add_get("/path/to/deep/page", handle_deep_page)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, 'localhost', 8080)
+    await site.start()
+
+    base_url = "http://localhost:8080"
+    deep_url = "http://localhost:8080/path/to/deep/page"
+
+    try:
+        async with IndexCrawler(base_url=base_url, max_depth=3) as crawler:
+            links = await crawler.crawl()
+            logger.info(f"Found links: {links}")
+            # The base_url itself will also be in found_links if successfully crawled
+            assert deep_url in links
+            assert base_url in links # Ensure the root is also crawled
+            assert len(links) >= 2 # Check if both root and deep link are found
+
+    finally:
+        await runner.cleanup()
+
+if __name__ == "__main__":
+    # To run the test:
+    # import asyncio
+    # asyncio.run(test_deep_url_crawler())
+    # logger.info("Deep URL crawler test completed.")
+    #
+    # Or run via pytest
+    pass
